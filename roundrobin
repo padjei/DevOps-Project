@@ -178,7 +178,7 @@ public without sharing class RoundRobinAssign {
     }
 
     /**
-     * Encapsulates all the necessary data to pass between methods, reducing parameter complexity.
+     * For analysis.
      */
     public class RoundRobinData {
         public List<RoundRobinAssignment> inputList;
