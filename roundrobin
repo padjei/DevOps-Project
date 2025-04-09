@@ -1,0 +1,201 @@
+public without sharing class RoundRobinAssign {
+
+    @InvocableMethod(label='Assign Round Robin User')
+    public static void assign(List<RoundRobinAssignment> inputList) {
+        if (inputList == null || inputList.isEmpty()) {
+            return;
+        }
+
+        // Validate inputs early
+        validateInputs(inputList);
+
+        // Prepare the necessary data
+        RoundRobinData data = prepareData(inputList);
+        
+        // Handle updates
+        processUpdates(data);
+    }
+
+    private static void validateInputs(List<RoundRobinAssignment> inputList) {
+        for (RoundRobinAssignment input : inputList) {
+            if (input.groupName == null || input.fieldName == null || input.recordId == null) {
+                throw new AuraHandledException('[ERROR] Missing groupName, fieldName, or recordId.');
+            }
+        }
+    }
+
+    private static RoundRobinData prepareData(List<RoundRobinAssignment> inputList) {
+        // Fetch settings, groups, and members in a streamlined way
+        Map<String, RoundRobin_Group__c> groupMap = getGroupSettings(inputList);
+        Map<String, Group> nameToGroup = getPublicGroups(groupMap);
+        Map<Id, List<Id>> groupIdToUserIds = getGroupMembers(nameToGroup);
+
+        // Return encapsulated data
+        return new RoundRobinData(inputList, groupMap, nameToGroup, groupIdToUserIds);
+    }
+
+    private static Map<String, RoundRobin_Group__c> getGroupSettings(List<RoundRobinAssignment> inputList) {
+        Set<String> keys = new Set<String>();
+        for (RoundRobinAssignment input : inputList) {
+            keys.add(input.groupName);
+        }
+
+        Map<String, RoundRobin_Group__c> groupMap = new Map<String, RoundRobin_Group__c>();
+        for (RoundRobin_Group__c setting : [
+            SELECT Id, DeveloperName__c, GroupName__c, Index__c
+            FROM RoundRobin_Group__c
+            WHERE DeveloperName__c IN :keys
+        ]) {
+            groupMap.put(setting.DeveloperName__c, setting);
+        }
+
+        if (groupMap.isEmpty()) {
+            throw new AuraHandledException('[ERROR] No group settings found.');
+        }
+
+        return groupMap;
+    }
+
+    private static Map<String, Group> getPublicGroups(Map<String, RoundRobin_Group__c> groupMap) {
+        Set<String> groupNames = new Set<String>();
+        for (RoundRobin_Group__c setting : groupMap.values()) {
+            groupNames.add(setting.GroupName__c);
+        }
+
+        Map<String, Group> groupNameToGroup = new Map<String, Group>();
+        for (Group g : [
+            SELECT Id, Name
+            FROM Group
+            WHERE Type = 'Regular' AND Name IN :groupNames
+        ]) {
+            groupNameToGroup.put(g.Name, g);
+        }
+
+        if (groupNameToGroup.isEmpty()) {
+            throw new AuraHandledException('[ERROR] No public groups found.');
+        }
+
+        return groupNameToGroup;
+    }
+
+    private static Map<Id, List<Id>> getGroupMembers(Map<String, Group> nameToGroup) {
+        Set<Id> groupIds = new Set<Id>();
+        for (Group g : nameToGroup.values()) {
+            groupIds.add(g.Id);
+        }
+
+        Map<Id, List<Id>> groupToUsers = new Map<Id, List<Id>>();
+        for (GroupMember gm : [
+            SELECT GroupId, UserOrGroupId
+            FROM GroupMember
+            WHERE GroupId IN :groupIds
+        ]) {
+            if (!groupToUsers.containsKey(gm.GroupId)) {
+                groupToUsers.put(gm.GroupId, new List<Id>());
+            }
+            groupToUsers.get(gm.GroupId).add(gm.UserOrGroupId);
+        }
+
+        if (groupToUsers.isEmpty()) {
+            throw new AuraHandledException('[ERROR] No users found in the assigned public groups.');
+        }
+
+        return groupToUsers;
+    }
+
+    /**
+     * Process records and settings updates using the data.
+     */
+    private static void processUpdates(RoundRobinData data) {
+        // Update records and settings
+        List<SObject> recordsToUpdate = buildRecordsToUpdate(data);
+        updateRecords(recordsToUpdate);
+
+        List<RoundRobin_Group__c> settingsToUpdate = buildSettingsToUpdate(data);
+        updateSettings(settingsToUpdate);
+    }
+
+    private static List<SObject> buildRecordsToUpdate(RoundRobinData data) {
+        List<SObject> recordsToUpdate = new List<SObject>();
+        for (RoundRobinAssignment input : data.inputList) {
+            RoundRobin_Group__c setting = data.groupMap.get(input.groupName);
+            Group groupObj = data.nameToGroup.get(setting.GroupName__c);
+            List<Id> userIds = data.groupIdToUserIds.get(groupObj.Id);
+            Integer nextIndex = getNextIndex(setting.Index__c, userIds.size());
+            Id assignedUser = userIds[nextIndex];
+            SObject recordToUpdate = input.recordId.getSObjectType().newSObject(input.recordId);
+            recordToUpdate.put(input.fieldName, assignedUser);
+            recordsToUpdate.add(recordToUpdate);
+        }
+        return recordsToUpdate;
+    }
+
+    private static List<RoundRobin_Group__c> buildSettingsToUpdate(RoundRobinData data) {
+        List<RoundRobin_Group__c> settingsToUpdate = new List<RoundRobin_Group__c>();
+        for (RoundRobinAssignment input : data.inputList) {
+            RoundRobin_Group__c setting = data.groupMap.get(input.groupName);
+            Group groupObj = data.nameToGroup.get(setting.GroupName__c);
+            List<Id> userIds = data.groupIdToUserIds.get(groupObj.Id);
+            Integer nextIndex = getNextIndex(setting.Index__c, userIds.size());
+            setting.Index__c = nextIndex;
+            settingsToUpdate.add(setting);
+        }
+        return settingsToUpdate;
+    }
+
+    private static void updateRecords(List<SObject> recordsToUpdate) {
+        if (!recordsToUpdate.isEmpty()) {
+            if (Schema.sObjectType.Opportunity.isUpdateable()) {
+                update recordsToUpdate;
+            } else {
+                throw new AuraHandledException('[ERROR] No update access on Opportunity.');
+            }
+        }
+    }
+
+    private static void updateSettings(List<RoundRobin_Group__c> settingsToUpdate) {
+        if (!settingsToUpdate.isEmpty()) {
+            if (Schema.sObjectType.RoundRobin_Group__c.isUpdateable()) {
+                update settingsToUpdate;
+            } else {
+                throw new AuraHandledException('[ERROR] No update access on RoundRobin_Group__c.');
+            }
+        }
+    }
+
+    private static Integer getNextIndex(Decimal currentIndex, Integer listSize) {
+        Integer idx = (currentIndex == null) ? 0 : Integer.valueOf(currentIndex);
+        return (idx >= listSize - 1) ? 0 : idx + 1;
+    }
+
+    public class RoundRobinAssignment {
+        @InvocableVariable(required=true label='Record Id')
+        public Id recordId;
+        @InvocableVariable(required=true label='Field API Name')
+        public String fieldName;
+        @InvocableVariable(required=true label='Group Name (DeveloperName of RoundRobin_Group__c)')
+        public String groupName;
+    }
+
+    /**
+     * Encapsulates all the necessary data to pass between methods, reducing parameter complexity.
+     */
+    public class RoundRobinData {
+        public List<RoundRobinAssignment> inputList;
+        public Map<String, RoundRobin_Group__c> groupMap;
+        public Map<String, Group> nameToGroup;
+        public Map<Id, List<Id>> groupIdToUserIds;
+
+        public RoundRobinData(
+            List<RoundRobinAssignment> inputList, 
+            Map<String, RoundRobin_Group__c> groupMap, 
+            Map<String, Group> nameToGroup, 
+            Map<Id, List<Id>> groupIdToUserIds
+        ) {
+            this.inputList = inputList;
+            this.groupMap = groupMap;
+            this.nameToGroup = nameToGroup;
+            this.groupIdToUserIds = groupIdToUserIds;
+        }
+    }
+}
